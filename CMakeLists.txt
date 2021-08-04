@@ -3,7 +3,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-project(cocos-explorer)
+project(cocos-designer)
 
 find_file(WINDOWS_HEADER windows.h)
 if(NOT WINDOWS_HEADER)
@@ -12,9 +12,9 @@ endif()
 
 file(GLOB_RECURSE IMGUI_FILES "libraries/imgui-hook/Universal OpenGL 2 Kiero Hook/**/*.cpp")
 file(GLOB_RECURSE SRC_FILES src/*.cpp)
-add_library(cocos-explorer SHARED ${SRC_FILES} ${IMGUI_FILES})
+add_library(cocos-designer SHARED ${SRC_FILES} ${IMGUI_FILES})
 
-target_include_directories(cocos-explorer PRIVATE
+target_include_directories(cocos-designer PRIVATE
   libraries/minhook/include
   "libraries/imgui-hook/Universal OpenGL 2 Kiero Hook/include"
   "libraries/imgui-hook/Universal OpenGL 2 Kiero Hook/include/imgui"
@@ -27,6 +27,6 @@ target_include_directories(cocos-explorer PRIVATE
 )
 
 add_subdirectory(libraries/minhook)
-target_link_libraries(cocos-explorer minhook)
-target_link_libraries(cocos-explorer ${CMAKE_SOURCE_DIR}/libraries/cocos-headers/cocos2dx/libcocos2d.lib)
-target_link_libraries(cocos-explorer opengl32)
+target_link_libraries(cocos-designer minhook)
+target_link_libraries(cocos-designer ${CMAKE_SOURCE_DIR}/libraries/cocos-headers/cocos2dx/libcocos2d.lib)
+target_link_libraries(cocos-designer opengl32)

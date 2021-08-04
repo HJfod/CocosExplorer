@@ -9,9 +9,12 @@
 #include <fstream>
 #include <sstream>
 
+#define GD_CONSOLE
+
 using namespace cocos2d;
 
 const char* getNodeName(CCNode* node) {
+    if (node == nullptr) return "nullptr";
     const char* name = typeid(*node).name() + 6;
     return name;
 }
@@ -31,8 +34,342 @@ bool operator!=(const CCSize& a, const CCSize& b) { return a.width != b.width ||
 
 std::queue<std::function<void()>> threadFunctions;
 std::mutex threadFunctionsMutex;
+enum edit_t { eNormal, eEdit, } editMode;
+CCNode* highlightedNode = nullptr;
+CCNode* selectedNode = nullptr;
+CCPoint clickOffset;
+bool snapEnabled = true;
+bool snapWindowEnabled = true;
+constexpr const float strokeSize = 3.0f;
+std::vector<int> openLocation;
 
-void generateTree(CCNode* node, unsigned int i = 0) {
+std::vector<int> getNodeLocationInTree(CCNode* node) {
+    auto c = node;
+
+    std::vector<int> res;
+
+    while (c->getParent()) {
+        auto par = c->getParent();
+        res.push_back(par->getChildren()->indexOfObject(c));
+        c = par;
+    }
+
+    res.push_back(0);
+
+    std::reverse(res.begin(), res.end());
+
+    return res;
+}
+
+bool filterNode(CCNode* node) {
+    if (dynamic_cast<CCLayer*>(node))
+        return false;
+    if (dynamic_cast<CCMenu*>(node))
+        return false;
+
+    return true;
+}
+
+bool stopCheckingChildren(CCNode* node) {
+    if (dynamic_cast<CCMenuItem*>(node))
+        return true;
+    if (dynamic_cast<CCLabelBMFont*>(node))
+        return true;
+
+    return false;
+}
+
+void getNodesUnderMouse(CCNode* parent, CCArray* res, CCPoint mpos) {
+    CCObject* obj;
+    CCARRAY_FOREACH(parent->getChildren(), obj) {
+        auto node = reinterpret_cast<CCNode*>(obj);
+
+        if (!node) continue;
+
+        auto pos = node->getPosition();
+        auto size = node->getScaledContentSize();
+        auto rect = CCRect { pos.x, pos.y, size.width, size.height };
+
+        rect.origin = rect.origin - rect.size / 2;
+
+        auto mposn = node->getParent()->convertToNodeSpace(mpos);
+
+        if (rect.containsPoint(mposn) && filterNode(node))
+            res->addObject(node);
+        
+        if (node->getChildrenCount() && !stopCheckingChildren(node))
+            getNodesUnderMouse(node, res, mpos);
+    }
+}
+
+const char* getRectText(CCRect const& rect) {
+    return std::string(
+        std::to_string(rect.origin.x) + ", " +
+        std::to_string(rect.origin.y) + "; " +
+        std::to_string(rect.size.width) + " : " +
+        std::to_string(rect.size.height)
+    ).c_str();
+}
+
+CCNode* getTopMost(CCArray* nodes) {
+    CCObject* obj;
+    CCNode* res = nullptr;
+    CCARRAY_FOREACH(nodes, obj) {
+        auto node = reinterpret_cast<CCNode*>(obj);
+
+        if (!res || node->getZOrder() >= res->getZOrder())
+                res = node;
+    }
+
+    return res;
+}
+
+CCRect operator/=(CCRect & rect, CCSize const& size) {
+    rect.origin.x /= size.width;
+    rect.origin.y /= size.height;
+    rect.size.width /= size.width;
+    rect.size.height /= size.height;
+
+    return rect;
+}
+
+CCPoint operator/=(CCPoint & point, CCSize const& size) {
+    point.x /= size.width;
+    point.y /= size.height;
+
+    return point;
+}
+
+HWND glfwGetWin32Window(GLFWwindow* wnd) {
+    auto cocosBase = GetModuleHandleA("libcocos2d.dll");
+
+    auto pRet = reinterpret_cast<HWND(__cdecl*)(GLFWwindow*)>(
+        reinterpret_cast<uintptr_t>(cocosBase) + 0x112c10
+    )(wnd);
+
+    return pRet;
+}
+
+CCRect operator*=(CCRect & rect, CCSize const& size) {
+    rect.origin.x *= size.width;
+    rect.origin.y *= size.height;
+    rect.size.width *= size.width;
+    rect.size.height *= size.height;
+
+    return rect;
+}
+
+ImVec2 ccpToImVec2(CCPoint const& p) {
+    return { p.x, p.y };
+}
+
+ImVec2 convertGlobalPointToWindowSpace(CCPoint const& p) {
+    ImVec2 res;
+
+    auto winSize = CCDirector::sharedDirector()->getWinSize();
+    auto eg = CCDirector::sharedDirector()->getOpenGLView();
+    auto hWnd = glfwGetWin32Window(eg->getWindow());
+
+    RECT wRect;
+    GetClientRect(hWnd, &wRect);
+    
+    float winWidth = static_cast<float>(wRect.right);
+    float winHeight = static_cast<float>(wRect.bottom);
+
+    res.x = p.x / winSize.width * winWidth;
+    res.y = p.y / winSize.height * winHeight;
+
+    // flip
+    res.y = winHeight - res.y;
+
+    return res;
+}
+
+void highlightNode(CCNode* node, bool sel = false) {
+    if (!node) return;
+
+    auto eg = CCDirector::sharedDirector()->getOpenGLView();
+    auto winSize = CCDirector::sharedDirector()->getWinSize();
+
+    ImDrawList& list = *ImGui::GetForegroundDrawList();
+
+    auto pos = node->getParent()->convertToWorldSpace(node->getPosition());
+    auto size = node->getScaledContentSize();
+    auto rect = CCRect { pos.x, pos.y, size.width, size.height };
+
+    rect.origin = rect.origin - rect.size / 2;
+
+    const auto [winWidth, winHeight] = ImGui::GetMainViewport()->Size;
+
+    rect /= winSize;
+    rect *= CCSize { winWidth, winHeight };
+
+    // flip
+    rect.origin.y = winHeight - rect.origin.y;
+    rect.origin.y -= rect.size.height;
+
+    if (sel)
+        list.AddRect(
+            ccpToImVec2(rect.origin),
+            ccpToImVec2(rect.origin + rect.size),
+            0xff00ff00,
+            0.0f, 15, strokeSize
+        );
+    else
+        list.AddRectFilled(
+            ccpToImVec2(rect.origin),
+            ccpToImVec2(rect.origin + rect.size),
+            0x3300ff00
+        );
+}
+
+CCPoint getRelativeMousePos() {
+    auto winSize = CCDirector::sharedDirector()->getWinSize();
+    auto winSizePx = CCDirector::sharedDirector()->getOpenGLView()->getViewPortRect();
+    auto ratio_w = winSize.width / winSizePx.size.width;
+    auto ratio_h = winSize.height / winSizePx.size.height;
+
+    auto mpos = CCDirector::sharedDirector()->getOpenGLView()->getMousePosition();
+    // the mouse position is stored from the top-left while cocos
+    // coordinates are from the bottom-left
+    mpos.y = winSizePx.size.height - mpos.y;
+
+    mpos.x *= ratio_w;  // scale mouse position to be in
+    mpos.y *= ratio_h;  // cocos2d coordinate space
+
+    return mpos;
+}
+
+void snapNodePosition(CCNode* node) {
+    if (node->getParent()->getChildrenCount() == 1)
+        return;
+    
+    if (!snapEnabled)
+        return;
+    
+    float threshold = 10.0f;
+
+    auto pos = node->getPosition();
+
+    CCNode* closestXNode = nullptr, *closestYNode = nullptr;
+    float closestX, closestY;
+    CCObject* obj;
+    CCARRAY_FOREACH(node->getParent()->getChildren(), obj) {
+        if (obj == node)
+            continue;
+        
+        auto nobj = reinterpret_cast<CCNode*>(obj);
+
+        if (nobj) {
+            if (!closestXNode) {
+                closestXNode = nobj;
+                closestYNode = nobj;
+                closestX = fabsf(nobj->getPositionX() - node->getPositionX());
+                closestY = fabsf(nobj->getPositionY() - node->getPositionY());
+                continue;
+            }
+
+            if (fabsf(nobj->getPositionX() - node->getPositionX()) < closestX) {
+                closestXNode = nobj;
+                closestX = fabsf(nobj->getPositionX() - node->getPositionX());
+            }
+            if (fabsf(nobj->getPositionY() - node->getPositionY()) < closestY) {
+                closestYNode = nobj;
+                closestY = fabsf(nobj->getPositionY() - node->getPositionY());
+            }
+        }
+    }
+
+    CCPoint wx, wy;
+    CCPoint gwx, gwy;
+
+    if (snapWindowEnabled) {
+        auto wposa = static_cast<CCPoint>(CCDirector::sharedDirector()->getWinSize() / 2);
+        auto wpos = node->getParent()->convertToNodeSpace(wposa);
+
+        if (fabsf(wpos.x - node->getPositionX()) <= closestX) {
+            closestXNode = nullptr;
+            closestX = fabsf(wpos.x - node->getPositionX());
+            wx = wpos;
+            gwx = wposa;
+        }
+        if (fabsf(wpos.y - node->getPositionY()) <= closestY) {
+            closestYNode = nullptr;
+            closestY = fabsf(wpos.y - node->getPositionY());
+            wy = wpos;
+            gwy = wposa;
+        }
+    }
+
+    ImDrawList& list = *ImGui::GetForegroundDrawList();
+    const auto [winWidth, winHeight] = ImGui::GetMainViewport()->Size;
+
+    ImVec2 xpos, ypos;
+
+    if (closestXNode) {
+        xpos = convertGlobalPointToWindowSpace(
+            closestXNode->getParent()->convertToWorldSpace(closestXNode->getPosition())
+        );
+    } else {
+        xpos = convertGlobalPointToWindowSpace(gwx);
+    }
+    if (closestYNode) {
+        ypos = convertGlobalPointToWindowSpace(
+            closestYNode->getParent()->convertToWorldSpace(closestYNode->getPosition())
+        );
+    } else {
+        ypos = convertGlobalPointToWindowSpace(gwy);
+    }
+    
+    if (closestX < threshold) {
+        if (closestXNode) {
+            node->setPositionX(closestXNode->getPositionX());
+            list.AddLine({ xpos.x, 0 }, { xpos.x, winHeight }, 0x44ffff00, strokeSize);
+        } else {
+            node->setPositionX(wx.x);
+            list.AddLine({ xpos.x, 0 }, { xpos.x, winHeight }, 0x44ff00ff, strokeSize);
+        }
+    }
+
+    if (closestY < threshold) {
+        if (closestYNode) {
+            node->setPositionY(closestYNode->getPositionY());
+            list.AddLine({ 0, ypos.y }, { winWidth, ypos.y }, 0x44ffff00, strokeSize);
+        } else {
+            node->setPositionY(wy.y);
+            list.AddLine({ 0, ypos.y }, { winWidth, ypos.y }, 0x44ff00ff, strokeSize);
+        }
+    }
+}
+
+void moveSelectedNode() {
+    if (!selectedNode)
+        return;
+    
+    auto eg = CCDirector::sharedDirector()->getOpenGLView();
+
+    auto pos = getRelativeMousePos();
+
+    auto npos = selectedNode->getParent()->convertToNodeSpace(pos);
+
+    selectedNode->setPosition(npos + clickOffset);
+
+    snapNodePosition(selectedNode);
+}
+
+void onSelectNode() {
+    if (!selectedNode)
+        return;
+
+    auto pos = getRelativeMousePos();
+
+    auto mpos = selectedNode->getParent()->convertToNodeSpace(pos);
+    auto npos = selectedNode->getPosition();
+
+    clickOffset = npos - mpos;
+}
+
+void generateTree(CCNode* node, unsigned int i = 0, unsigned int hix = 0u) {
     std::stringstream stream;
     stream << "[" << i << "] " << getNodeName(node);
     if (node->getTag() != -1)
@@ -40,6 +377,9 @@ void generateTree(CCNode* node, unsigned int i = 0) {
     const auto childrenCount = node->getChildrenCount();
     if (childrenCount)
         stream << " {" << childrenCount << "}";
+    if (openLocation.size()) {
+        ImGui::SetNextItemOpen(openLocation[hix] == i);
+    }
     if (ImGui::TreeNode(node, stream.str().c_str())) {
         if (ImGui::TreeNode(node + 1, "Attributes")) {
             if (ImGui::Button("Delete")) {
@@ -51,6 +391,10 @@ void generateTree(CCNode* node, unsigned int i = 0) {
             ImGui::SameLine();
             if (ImGui::Button("Add Child")) {
                 ImGui::OpenPopup("Add Child");
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Highlight")) {
+                highlightNode(node);
             }
 
             if (ImGui::BeginPopupModal("Add Child")) {
@@ -93,7 +437,7 @@ void generateTree(CCNode* node, unsigned int i = 0) {
                             break;
                         }
                         case 2: {
-                            auto child = CCLabelTTF::create(text, "Arial", fontSize);
+                            auto child = CCLabelTTF::create(text, "Arial", static_cast<float>(fontSize));
                             _child = child;
                             break;
                         }
@@ -150,7 +494,7 @@ void generateTree(CCNode* node, unsigned int i = 0) {
             node->setPosition({ _pos[0], _pos[1] });
 
             float _scale[3] = { node->getScale(), node->getScaleX(), node->getScaleY() };
-            ImGui::DragFloat3("Scale", _scale, 0.025);
+            ImGui::DragFloat3("Scale", _scale, 0.025f);
             // amazing
             if (node->getScale() != _scale[0])
                 node->setScale(_scale[0]);
@@ -202,7 +546,7 @@ void generateTree(CCNode* node, unsigned int i = 0) {
                     static_cast<GLubyte>(_color[1] * 255),
                     static_cast<GLubyte>(_color[2] * 255)
                 });
-                rgbaNode->setOpacity(_color[3] * 255);
+                rgbaNode->setOpacity(static_cast<GLubyte>(_color[3] * 255));
             }
             if (dynamic_cast<CCLabelProtocol*>(node) != nullptr) {
                 auto labelNode = dynamic_cast<CCLabelProtocol*>(node);
@@ -225,39 +569,126 @@ void generateTree(CCNode* node, unsigned int i = 0) {
         auto children = node->getChildren();
         for (unsigned int i = 0; i < node->getChildrenCount(); ++i) {
             auto child = children->objectAtIndex(i);
-            generateTree(dynamic_cast<CCNode*>(child), i);
+            generateTree(dynamic_cast<CCNode*>(child), i, hix + 1);
         }
         ImGui::TreePop();
     }
 }
 
+void highlightNodeUnderMouse(CCDirector* director) {
+    if (editMode != eEdit)
+        return;
+    if (selectedNode)
+        return;
+    if (!CCDirector::sharedDirector()->getTouchDispatcher()->isDispatchEvents())
+        return;
+    
+    auto scene = director->getRunningScene();
+    
+    auto mpos = getRelativeMousePos();
+    
+    auto array = CCArray::create();
+    getNodesUnderMouse(scene, array, mpos);
+    auto node = getTopMost(array);
+    
+    highlightedNode = node;
+
+    highlightNode(node);
+}
+
 bool g_showWindow = true;
 
 void RenderMain() {
+    auto director = CCDirector::sharedDirector();
+    moveSelectedNode();
+    highlightNodeUnderMouse(director);
+    highlightNode(selectedNode, true);
+    
     if (g_showWindow) {
         auto& style = ImGui::GetStyle();
         style.ColorButtonPosition = ImGuiDir_Left;
 
-        auto director = CCDirector::sharedDirector();
         // thx andre
         const bool enableTouch = !ImGui::GetIO().WantCaptureMouse;
         director->getTouchDispatcher()->setDispatchEvents(enableTouch);
-        if (ImGui::Begin("cocos2d explorer"), nullptr, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar) {
+        if (ImGui::Begin("CocosDesigner"), nullptr, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar) {
+            if (ImGui::RadioButton("Edit Mode", editMode == eEdit)) {
+                editMode = editMode == eEdit ? eNormal : eEdit;
+                selectedNode = nullptr;
+                highlightedNode = nullptr;
+            }
+            ImGui::Text("%s, %s", getNodeName(highlightedNode), getNodeName(selectedNode));
+            ImGui::Checkbox("Snap Position", &snapEnabled);
+            ImGui::SameLine();
+            ImGui::Checkbox("Snap To Window", &snapWindowEnabled);
+            ImGui::NewLine();
+            ImGui::Separator();
+            ImGui::NewLine();
             auto curScene = director->getRunningScene();
             generateTree(curScene);
         }
+        if (openLocation.size())
+            openLocation.clear();
         ImGui::End();
     }
 }
 
+inline void(__thiscall* onGLFWMouseCallBack)(CCEGLView*, GLFWwindow*, int, int, int);
+void __fastcall onGLFWMouseCallBackHook(CCEGLView* self, void*, GLFWwindow* wnd, int btn, int pressed, int z) {
+    if (editMode == eNormal)
+        return onGLFWMouseCallBack(self, wnd, btn, pressed, z);
+    
+    if (!CCDirector::sharedDirector()->getTouchDispatcher()->isDispatchEvents())
+        return;
+
+    if (pressed)
+        switch (btn) {
+            case 0: selectedNode = highlightedNode; break;
+            case 2: {
+                openLocation = getNodeLocationInTree(highlightedNode);
+
+                g_showWindow = true;
+            } break;
+        }
+    else
+        selectedNode = nullptr;
+    
+    onSelectNode();
+}
+
+bool (__thiscall* dispatchScrollMSG)(CCMouseDelegate*, float, float);
+bool __fastcall dispatchScrollMSGHook(CCMouseDelegate* self, void*, float deltaY, float param_2) {
+    if (editMode == eNormal)
+        return dispatchScrollMSG(self, deltaY, param_2);
+    
+    if (!CCDirector::sharedDirector()->getTouchDispatcher()->isDispatchEvents())
+        return true;
+
+    auto target = selectedNode ? selectedNode : highlightedNode;
+
+    if (!target) return true;
+
+    auto kb = CCDirector::sharedDirector()->getKeyboardDispatcher();
+
+    if (kb->getShiftKeyPressed())
+        target->setRotation(target->getRotation() + (-deltaY / 3.0f));
+    else
+        target->setScale(target->getScale() * (deltaY / 96.0f + 1.0f));
+
+    return true;
+}
+
 inline void(__thiscall* dispatchKeyboardMSG)(void* self, int key, bool down);
 void __fastcall dispatchKeyboardMSGHook(void* self, void*, int key, bool down) {
+
     if (ImGui::GetIO().WantCaptureKeyboard) return;
     else if (down && key == 'K') {
         g_showWindow ^= 1;
         if (!g_showWindow)
             CCDirector::sharedDirector()->getTouchDispatcher()->setDispatchEvents(true);
     }
+    if (editMode == eEdit)
+        return;
     dispatchKeyboardMSG(self, key, down);
 }
 
@@ -273,13 +704,15 @@ void __fastcall schUpdateHook(CCScheduler* self, void*, float dt) {
 }
 
 DWORD WINAPI my_thread(void* hModule) {
-#if _DEBUG
+#ifdef GD_CONSOLE
     AllocConsole();
     std::ofstream conout("CONOUT$", std::ios::out);
     std::ifstream conin("CONIN$", std::ios::in);
     std::cout.rdbuf(conout.rdbuf());
     std::cin.rdbuf(conin.rdbuf());  
 #endif
+    editMode = eNormal;
+
     auto cocosBase = GetModuleHandleA("libcocos2d.dll");
     MH_CreateHook(
         GetProcAddress(cocosBase, "?dispatchKeyboardMSG@CCKeyboardDispatcher@cocos2d@@QAE_NW4enumKeyCodes@2@_N@Z"),
@@ -291,9 +724,19 @@ DWORD WINAPI my_thread(void* hModule) {
         &schUpdateHook,
         reinterpret_cast<void**>(&schUpdate)
     );
+    MH_CreateHook(
+        GetProcAddress(cocosBase, "?onGLFWMouseCallBack@CCEGLView@cocos2d@@IAEXPAUGLFWwindow@@HHH@Z"),
+        &onGLFWMouseCallBackHook,
+        reinterpret_cast<void**>(&onGLFWMouseCallBack)
+    );
+    MH_CreateHook(
+        GetProcAddress(cocosBase, "?dispatchScrollMSG@CCMouseDispatcher@cocos2d@@QAE_NMM@Z"),
+        &dispatchScrollMSGHook,
+        reinterpret_cast<void**>(&dispatchScrollMSG)
+    );
     MH_EnableHook(MH_ALL_HOOKS);
 
-#if 0
+#ifdef GD_CONSOLE
     std::getline(std::cin, std::string());
 
     MH_Uninitialize();
