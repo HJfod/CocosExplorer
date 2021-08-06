@@ -11,7 +11,7 @@ if(NOT WINDOWS_HEADER)
 endif()
 
 file(GLOB_RECURSE IMGUI_FILES "libraries/imgui-hook/Universal OpenGL 2 Kiero Hook/**/*.cpp")
-file(GLOB_RECURSE SRC_FILES src/*.cpp)
+file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.h src/*.hpp)
 add_library(cocos-designer SHARED ${SRC_FILES} ${IMGUI_FILES})
 
 target_include_directories(cocos-designer PRIVATE
@@ -24,6 +24,7 @@ target_include_directories(cocos-designer PRIVATE
   libraries/cocos-headers/cocos2dx/platform/win32
   libraries/cocos-headers/cocos2dx/platform/third_party/win32
   libraries/cocos-headers/cocos2dx/platform/third_party/win32/OGLES
+  libraries/cocos-headers/extensions/GUI/CCControlExtension
 )
 
 add_subdirectory(libraries/minhook)
