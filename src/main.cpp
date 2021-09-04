@@ -52,9 +52,13 @@ bool addingNode = false;
 CCPoint clickOffset;
 CCPoint startPos;
 bool snapEnabled = true;
+bool snapX = true;
+bool snapY = true;
 bool snapWindowEnabled = true;
 bool snapWindowSidesEnabled = true;
+bool snapNodeSidesEnabled = true;
 bool snapGridEnabled = true;
+bool snapLineEnabled = true;
 bool saveChanges = false;
 bool onlyDeleteSelected = false;
 constexpr const float strokeSize = 3.0f;
@@ -65,7 +69,7 @@ bool g_showWindow = true;
 bool selectionMoved = false;
 int mouseBtnDown = -1;
 bool modifyingNode = false;
-bool resizingNode = false;
+int resizingNode = 0;
 bool openAddPopup = false;
 bool addPopupOpen = false;
 CCNode* addTarget = nullptr;
@@ -252,9 +256,9 @@ bool filterNode(CCNode* node, bool isContainer) {
 bool stopCheckingChildren(CCNode* node) {
     if (dynamic_cast<CCMenuItem*>(node))
         return true;
-    if (dynamic_cast<CCLabelBMFont*>(node))
-        return true;
     if (dynamic_cast<CCScale9Sprite*>(node))
+        return true;
+    if (dynamic_cast<CCLabelBMFont*>(node))
         return true;
     if (!node->isVisible())
         return true;
@@ -268,6 +272,7 @@ void getNodesUnderMouse(CCNode* parent, CCArray* res, CCPoint mpos, bool contain
         auto node = reinterpret_cast<CCNode*>(obj);
 
         if (!node) continue;
+        if (!node->getParent()) continue;
 
         auto pos = node->getPosition();
         auto size = node->getScaledContentSize();
@@ -398,6 +403,7 @@ enum highlight {
 
 void highlightNode(CCNode* node, highlight sel = hlNormal) {
     if (!node) return;
+    if (!node->getParent()) return;
 
     auto eg = CCDirector::sharedDirector()->getOpenGLView();
     auto winSize = CCDirector::sharedDirector()->getWinSize();
@@ -500,17 +506,135 @@ void snapNodeToWindowSides(CCNode* node) {
 
         temp_dist_left = node->getPositionX() - csize.width - left;
 
-        if (fabsf(node->getPositionX() - csize.width - left) < g_snapThreshold)
+        if (snapX && fabsf(node->getPositionX() - csize.width - left) < g_snapThreshold)
             node->setPositionX(left + csize.width);
 
-        if (fabsf(node->getPositionX() + csize.width - right) < g_snapThreshold)
+        if (snapX && fabsf(node->getPositionX() + csize.width - right) < g_snapThreshold)
             node->setPositionX(right - csize.width);
 
-        if (fabsf(node->getPositionY() - csize.height - bottom) < g_snapThreshold)
+        if (snapY && fabsf(node->getPositionY() - csize.height - bottom) < g_snapThreshold)
             node->setPositionY(bottom + csize.height);
 
-        if (fabsf(node->getPositionY() + csize.height - top) < g_snapThreshold)
+        if (snapY && fabsf(node->getPositionY() + csize.height - top) < g_snapThreshold)
             node->setPositionY(top - csize.height);
+    }
+}
+
+float nodedisx(CCNode* p1, CCNode* p2) {
+    return fabsf(p1->getPositionX() - p2->getPositionX());
+}
+
+float nodedisy(CCNode* p1, CCNode* p2) {
+    return fabsf(p1->getPositionY() - p2->getPositionY());
+}
+
+void snapNodeToGrid(CCNode* node, CCArray* closestXNodes, CCArray* closestYNodes) {
+    if (!snapGridEnabled)
+        return;
+
+    CCObject* obj;
+
+    CCNode* closestXNode = nullptr;
+    CCNode* closestYNode = nullptr;
+
+    std::set<float> xdiffs;
+    std::set<float> ydiffs;
+
+    float last = 0.0f;
+    if (snapY)
+        CCARRAY_FOREACH(closestXNodes, obj) {
+            xdiffs.insert(reinterpret_cast<CCNode*>(obj)->getPositionY() - last);
+            last = reinterpret_cast<CCNode*>(obj)->getPositionY();
+
+            if (!closestXNode)
+                closestXNode = reinterpret_cast<CCNode*>(obj);
+            else
+                if (nodedisy(node, reinterpret_cast<CCNode*>(obj)) < nodedisy(node, closestXNode))
+                    closestXNode = node;
+        }
+
+    last = 0.0f;
+    if (snapX)
+        CCARRAY_FOREACH(closestYNodes, obj) {
+            ydiffs.insert(reinterpret_cast<CCNode*>(obj)->getPositionX() - last);
+            last = reinterpret_cast<CCNode*>(obj)->getPositionX();
+
+            if (!closestYNode)
+                closestYNode = reinterpret_cast<CCNode*>(obj);
+            else
+                if (nodedisx(node, reinterpret_cast<CCNode*>(obj)) < nodedisx(node, closestYNode))
+                    closestYNode = node;
+        }
+
+
+    // ImGui::Text("xdiffs");
+    // for (auto diff : xdiffs) {
+    //     auto ndiff = node->getPositionY() - closestXNode->getPositionY();
+
+    //     ImGui::Text("%.2f -> %.2f", fabsf(diff), fabsf(ndiff));
+
+    //     if (fabsf(fabsf(diff) - fabsf(ndiff)) < g_snapThreshold) {
+    //         node->setPositionY(closestXNode->getPositionY() + ndiff);
+    //         break;
+    //     }
+    // }
+
+    // ImGui::Text("ydiffs");
+    // for (auto diff : ydiffs) {
+    //     auto ndiff = node->getPositionX() - closestYNode->getPositionX();
+
+    //     ImGui::Text("%.2f -> %.2f / %.2f", fabsf(diff), fabsf(ndiff), fabsf(fabsf(diff) - fabsf(ndiff)));
+
+    //     if (fabsf(fabsf(diff) - fabsf(ndiff)) < g_snapThreshold) {
+    //         float r;
+    //         if (node->getPositionX() < closestYNode->getPositionX())
+    //             r = -diff;
+    //         else
+    //             r = diff;
+    //         node->setPositionX(closestYNode->getPositionX() + r);
+    //         break;
+    //     }
+    // }
+}
+
+void snapNodeToNear(CCNode* node) {
+    CCObject* obj;
+    CCNode* nearest;
+    float dis = -1.0f;
+    
+    CCARRAY_FOREACH(node->getParent()->getChildren(), obj) {
+        if (node == obj)
+            continue;
+        
+        auto nobj = reinterpret_cast<CCNode*>(obj);
+
+        auto d = ccpDistance(nobj->getPosition(), node->getPosition());
+        if (dis < 0.0f || d < dis) {
+            nearest = nobj;
+            dis = d;
+        }
+    }
+
+    auto cc = node->getScaledContentSize() / 2;
+    auto cc2 = nearest->getScaledContentSize() / 2;
+    auto pos = node->getPosition();
+    auto pos2 = nearest->getPosition();
+
+    auto disx = fabsf(pos.x - pos2.x);
+    auto disy = fabsf(pos.y - pos2.y);
+
+    if (snapX && fabsf(disx - cc.width - cc2.width) < g_snapThreshold) {
+        if (pos.x < pos2.x)
+            node->setPositionX(pos2.x - cc2.width - cc.width);
+        else
+            node->setPositionX(pos2.x + cc2.width + cc.width);
+    }
+
+    if (snapY && fabsf(disy - cc.height - cc2.height) < g_snapThreshold) {
+        if (pos.y < pos2.y)
+            node->setPositionY(pos2.y - cc2.height - cc.height);
+        else
+            node->setPositionY(pos2.y + cc2.height + cc.height);
     }
 }
 
@@ -626,11 +750,15 @@ void snapNodePosition(CCNode* node) {
     }
     
     snapNodeToWindowSides(node);
+    snapNodeToGrid(node, closestXNodes, closestYNodes);
+    snapNodeToNear(node);
 
-    if (closestX < g_snapThreshold) {
+    if (snapX && closestX < g_snapThreshold) {
         if (closestXNode && !mouseX) {
-            node->setPositionX(closestXNode->getPositionX());
-            list.AddLine({ xpos.x, 0 }, { xpos.x, winHeight }, 0x44ffff00, strokeSize);
+            if (snapLineEnabled) {
+                node->setPositionX(closestXNode->getPositionX());
+                list.AddLine({ xpos.x, 0 }, { xpos.x, winHeight }, 0x44ffff00, strokeSize);
+            }
         } else {
             node->setPositionX(wx.x);
             list.AddLine({ xpos.x, 0 }, { xpos.x, winHeight }, 0x44ff00ff, strokeSize);
@@ -641,10 +769,12 @@ void snapNodePosition(CCNode* node) {
             highlightNode(reinterpret_cast<CCNode*>(iobj), hlAltOutline);
     }
 
-    if (closestY < g_snapThreshold) {
+    if (snapY && closestY < g_snapThreshold) {
         if (closestYNode && !mouseY) {
-            node->setPositionY(closestYNode->getPositionY());
-            list.AddLine({ 0, ypos.y }, { winWidth, ypos.y }, 0x44ffff00, strokeSize);
+            if (snapLineEnabled) {
+                node->setPositionY(closestYNode->getPositionY());
+                list.AddLine({ 0, ypos.y }, { winWidth, ypos.y }, 0x44ffff00, strokeSize);
+            }
         } else {
             node->setPositionY(wy.y);
             list.AddLine({ 0, ypos.y }, { winWidth, ypos.y }, 0x44ff00ff, strokeSize);
@@ -654,7 +784,7 @@ void snapNodePosition(CCNode* node) {
         CCARRAY_FOREACH(closestYNodes, iobj)
             highlightNode(reinterpret_cast<CCNode*>(iobj), hlAltOutline2);
     }
-    
+
     closestXNodes->release();
     closestYNodes->release();
 }
@@ -813,6 +943,7 @@ void generateTree(CCNode* node, unsigned int i = 0, unsigned int hix = 0u) {
                 addTarget = node;
                 ImGui::OpenPopup("Add Child");
             }
+            selectAddNode();
             ImGui::SameLine();
             if (ImGui::Button("Highlight")) {
                 highlightNode(node);
@@ -827,6 +958,37 @@ void generateTree(CCNode* node, unsigned int i = 0, unsigned int hix = 0u) {
             }
             if (node->getUserData()) {
                 ImGui::Text("User data: 0x%p", node->getUserData());
+            }
+
+            if (ImGui::Button("Copy Pos")) {
+                auto pos = node->getPosition();
+                clipboardText(std::string(
+                    std::to_string(static_cast<int>(roundf(pos.x))) + ".0f, " +
+                    std::to_string(static_cast<int>(roundf(pos.y))) + ".0f"
+                ).c_str());
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Copy Pos WC")) {
+                auto winSize = CCDirector::sharedDirector()->getWinSize();
+                auto pos = node->getParent()->convertToWorldSpace(node->getPosition());
+                pos.x -= winSize.width / 2;
+                pos.y -= winSize.height / 2;
+                pos.x = roundf(pos.x);
+                pos.y = roundf(pos.y);
+                auto str =
+                std::string("winSize.width / 2 ") + (pos.x < 0.0f ? "- " : "+ ") +
+                    std::to_string(static_cast<int>(fabsf(pos.x))) + ".0f" +
+                    ", winSize.height / 2 " + (pos.y < 0.0f ? "- " : "+ ") +
+                    std::to_string(static_cast<int>(fabsf(pos.y))) + ".0f";
+                clipboardText(str.c_str());
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Copy Abs Pos")) {
+                auto pos = node->getParent()->convertToWorldSpace(node->getPosition());
+                clipboardText(std::string(
+                    std::to_string(static_cast<int>(roundf(pos.x))) + ".0f, " +
+                    std::to_string(static_cast<int>(roundf(pos.y))) + ".0f"
+                ).c_str());
             }
 
             auto pos = node->getPosition();
@@ -971,7 +1133,7 @@ void highlightNodeUnderMouse(CCDirector* director) {
     }
 }
 
-bool intersectsModifyControls() {
+int intersectsModifyControls() {
     if (!selectedNode || !modifyingNode)
         return false;
 
@@ -982,8 +1144,15 @@ bool intersectsModifyControls() {
     pos = pos - size / 2;
 
     auto mrect = CCRect { pos.x - 7.5f, pos.y + size.height - 7.5f, 15.f, 15.f };
+    auto mrect2 = CCRect { pos.x - 7.5f, pos.y - 7.5f, 15.f, 15.f };
 
-    return mrect.containsPoint(mpos);
+    if (mrect.containsPoint(mpos))
+        return 1;
+    
+    if (mrect2.containsPoint(mpos))
+        return 2;
+    
+    return 0;
 }
 
 void showModifyControls() {
@@ -999,7 +1168,12 @@ void showModifyControls() {
     list.AddRectFilled(
         { pos.x - rectfw / 2, pos.y - rectfw / 2 },
         { pos.x + rectfw / 2, pos.y + rectfw / 2 },
-        intersectsModifyControls() ? 0xffffff00 : 0xff0000ff
+        intersectsModifyControls() == 1 ? 0xffffff00 : 0xff0000ff
+    );
+    list.AddRectFilled(
+        { pos.x - rectfw / 2, pos.y + size.size.height - rectfw / 2 },
+        { pos.x + rectfw / 2, pos.y + size.size.height + rectfw / 2 },
+        intersectsModifyControls() == 2 ? 0xffffff00 : 0xff0ff0ff
     );
 
     if (resizingNode) {
@@ -1012,7 +1186,17 @@ void showModifyControls() {
         clickOffset2.x = fabsf(clickOffset2.x);
         clickOffset2.y = fabsf(clickOffset2.y);
 
-        selectedNode->setContentSize(clickOffset2 * 2);
+        if (resizingNode == 1) {
+            selectedNode->setContentSize(clickOffset2 * 2 / selectedNode->getScale());
+        }
+
+        if (resizingNode == 2) {
+            auto scaleX = clickOffset2.x / (selectedNode->getContentSize().width / 2);
+            auto scaleY = clickOffset2.y / (selectedNode->getContentSize().height / 2);
+
+            selectedNode->setScaleX(scaleX);
+            selectedNode->setScaleY(scaleY);
+        }
 
         registerNodeAsModified(selectedNode);
     }
@@ -1043,12 +1227,22 @@ void RenderMain() {
                 highlightedNode = nullptr;
             }
             ImGui::Text("%s, %s", getNodeName(highlightedNode), getNodeName(selectedNode));
-            ImGui::Checkbox("Snap Position", &snapEnabled);
+            ImGui::Checkbox("Snap", &snapEnabled);
             if (snapEnabled) {
                 ImGui::SameLine();
-                ImGui::Checkbox("Snap To Window", &snapWindowEnabled);
+                ImGui::Checkbox("X", &snapX);
                 ImGui::SameLine();
-                ImGui::Checkbox("Snap To Sides", &snapWindowSidesEnabled);
+                ImGui::Checkbox("Y", &snapY);
+                ImGui::SameLine();
+                ImGui::Checkbox("Window", &snapWindowEnabled);
+                ImGui::SameLine();
+                ImGui::Checkbox("Line", &snapLineEnabled);
+                ImGui::SameLine();
+                ImGui::Checkbox("Grid", &snapGridEnabled);
+                ImGui::SameLine();
+                ImGui::Checkbox("Window Edges", &snapWindowSidesEnabled);
+                ImGui::SameLine();
+                ImGui::Checkbox("Node Edges", &snapNodeSidesEnabled);
             }
             ImGui::Checkbox("Only Delete Selected", &onlyDeleteSelected);
             ImGui::NewLine();
@@ -1068,23 +1262,27 @@ void RenderMain() {
             ImGui::NewLine();
             ImGui::Separator();
             ImGui::NewLine();
+
+            if (openAddPopup) {
+                addTarget = highlightedNode;
+                ImGui::OpenPopup("Add Child");
+                openAddPopup = false;
+            }
             
             auto curScene = director->getRunningScene();
             generateTree(curScene);
-            selectAddNode();
         }
         if (openLocation.size())
             openLocation.clear();
         ImGui::End();
-    }
-
-    if (openAddPopup) {
-        addTarget = highlightedNode;
-        ImGui::OpenPopup("Add Child");
-        openAddPopup = false;
-    }
-    if (!g_showWindow)
+    } else {
+        if (openAddPopup) {
+            addTarget = highlightedNode;
+            ImGui::OpenPopup("Add Child");
+            openAddPopup = false;
+        }
         selectAddNode();
+    }
 
     if (editMode == eNormal) {
         highlightedNode = nullptr;
@@ -1113,6 +1311,8 @@ void __fastcall onGLFWMouseCallBackHook(CCEGLView* self, void*, GLFWwindow* wnd,
         return onGLFWMouseCallBack(self, wnd, btn, pressed, z);
     
     if (!CCDirector::sharedDirector()->getTouchDispatcher()->isDispatchEvents())
+        return;
+    if (addPopupOpen)
         return;
 
     if (pressed) {
@@ -1169,6 +1369,10 @@ bool __fastcall dispatchScrollMSGHook(CCMouseDelegate* self, void*, float deltaY
 
     if (!target) return true;
 
+    auto otarget = target;
+    if (dynamic_cast<CCMenuItemSprite*>(target))
+        target = dynamic_cast<CCMenuItemSprite*>(target)->getNormalImage();
+
     auto kb = CCDirector::sharedDirector()->getKeyboardDispatcher();
 
     if (kb->getShiftKeyPressed())
@@ -1176,7 +1380,7 @@ bool __fastcall dispatchScrollMSGHook(CCMouseDelegate* self, void*, float deltaY
     else
         target->setScale(target->getScale() * (deltaY / 96.0f + 1.0f));
 
-    registerNodeAsModified(target);
+    registerNodeAsModified(otarget);
 
     return true;
 }
